@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <filesystem>
+
 
 #include <libserial/SerialPort.h>
 
@@ -60,6 +62,11 @@ public:
   void connect(const std::string & device, int32_t serial_baud_rate, int32_t timeout_ms)
   {
     timeout_ms_ = timeout_ms;
+    
+    if (!std::filesystem::exists(device))
+    {
+      throw std::runtime_error("Serial device does not exist: " + device);
+    }
 
     try
     {
@@ -81,6 +88,7 @@ public:
       throw std::runtime_error(
         "Failed to open CAN adapter serial device '" + device + "': " + e.what());
     }
+
   }
 
   void disconnect()
