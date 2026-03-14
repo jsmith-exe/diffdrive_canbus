@@ -1,43 +1,52 @@
-#ifndef DIFFDRIVE_CANBUS_WHEEL_HPP
-#define DIFFDRIVE_CANBUS_WHEEL_HPP
+#ifndef DIFFDRIVE_CANBUS__WHEEL_HPP_
+#define DIFFDRIVE_CANBUS__WHEEL_HPP_
 
-#include <string>
 #include <cmath>
+#include <cstdint>
+#include <string>
 
+namespace diffdrive_canbus
+{
 
 class Wheel
 {
-    public:
+public:
+  std::string name = "";
+  int32_t enc = 0;
+  int32_t prev_enc = 0;
 
-    std::string name = "";
-    int enc = 0;
-    double cmd = 0;
-    double pos = 0;
-    double vel = 0;
-    double rads_per_count = 0;
+  double cmd = 0.0;   // commanded angular velocity [rad/s]
+  double pos = 0.0;   // wheel position [rad]
+  double vel = 0.0;   // wheel velocity [rad/s]
 
-    Wheel() = default;
+  double rads_per_count = 0.0;
 
-    Wheel(const std::string &wheel_name, int counts_per_rev)
+  Wheel() = default;
+
+  Wheel(const std::string & wheel_name, int counts_per_rev)
+  {
+    setup(wheel_name, counts_per_rev);
+  }
+
+  void setup(const std::string & wheel_name, int counts_per_rev)
+  {
+    name = wheel_name;
+
+    if (counts_per_rev <= 0)
     {
-      setup(wheel_name, counts_per_rev);
+      rads_per_count = 0.0;
+      return;
     }
 
-    
-    void setup(const std::string &wheel_name, int counts_per_rev)
-    {
-      name = wheel_name;
-      rads_per_count = (2*M_PI)/counts_per_rev;
-    }
+    rads_per_count = (2.0 * M_PI) / static_cast<double>(counts_per_rev);
+  }
 
-    double calc_enc_angle()
-    {
-      return enc * rads_per_count;
-    }
-
-
-
+  double calc_enc_angle() const
+  {
+    return static_cast<double>(enc) * rads_per_count;
+  }
 };
 
+}  // namespace diffdrive_canbus
 
-#endif // DIFFDRIVE_CANBUS_WHEEL_HPP
+#endif  // DIFFDRIVE_CANBUS__WHEEL_HPP_

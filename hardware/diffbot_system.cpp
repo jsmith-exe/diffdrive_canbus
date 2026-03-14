@@ -1,23 +1,9 @@
-// Copyright 2021 ros2_control Development Team
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "diffdrive_canbus/diffbot_system.hpp"
 
-#include <chrono>
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
@@ -25,6 +11,7 @@
 
 namespace diffdrive_canbus
 {
+
 hardware_interface::CallbackReturn DiffDriveCANBusHardware::on_init(
   const hardware_interface::HardwareInfo & info)
 {
@@ -35,39 +22,76 @@ hardware_interface::CallbackReturn DiffDriveCANBusHardware::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  auto logger = rclcpp::get_logger("DiffDriveCANBusHardware");
 
-  cfg_.left_wheel_name = info_.hardware_parameters["left_wheel_name"];
-  cfg_.right_wheel_name = info_.hardware_parameters["right_wheel_name"];
-  cfg_.loop_rate = std::stof(info_.hardware_parameters["loop_rate"]);
-  cfg_.device = info_.hardware_parameters["device"];
-  cfg_.baud_rate = std::stoi(info_.hardware_parameters["baud_rate"]);
-  cfg_.timeout_ms = std::stoi(info_.hardware_parameters["timeout_ms"]);
-  cfg_.enc_counts_per_rev = std::stoi(info_.hardware_parameters["enc_counts_per_rev"]);
-  if (info_.hardware_parameters.count("pid_p") > 0)
+  auto get_string_param = [&](const std::string & key) -> std::string
   {
-    cfg_.pid_p = std::stoi(info_.hardware_parameters["pid_p"]);
-    cfg_.pid_d = std::stoi(info_.hardware_parameters["pid_d"]);
-    cfg_.pid_i = std::stoi(info_.hardware_parameters["pid_i"]);
-    cfg_.pid_o = std::stoi(info_.hardware_parameters["pid_o"]);
-  }
-  else
+    const auto it = info_.hardware_parameters.find(key);
+    if (it == info_.hardware_parameters.end()) {
+      throw std::runtime_error("Missing required hardware parameter: " + key);
+    }
+    return it->second;
+  };
+
+  auto get_int_param = [&](const std::string & key) -> int
   {
-    RCLCPP_INFO(rclcpp::get_logger("DiffDriveCANBusHardware"), "PID values not supplied, using defaults.");
+    const auto it = info_.hardware_parameters.find(key);
+    if (it == info_.hardware_parameters.end()) {
+      throw std::runtime_error("Missing required hardware parameter: " + key);
+    }
+
+    try {
+      return std::stoi(it->second);
+    } catch (const std::exception &) {
+      throw std::runtime_error(
+        "Invalid integer for hardware parameter '" + key + "': '" + it->second + "'");
+    }
+  };
+
+  try
+  {
+    cfg_.front_left_wheel_name  = get_string_param("front_left_wheel_name");
+    cfg_.front_right_wheel_name = get_string_param("front_right_wheel_name");
+    cfg_.rear_left_wheel_name   = get_string_param("rear_left_wheel_name");
+    cfg_.rear_right_wheel_name  = get_string_param("rear_right_wheel_name");
+
+    cfg_.serial_device     = get_string_param("serial_device");
+    cfg_.serial_baud_rate  = get_int_param("serial_baud_rate");
+    cfg_.can_baud_rate     = get_int_param("can_baud_rate");
+    cfg_.timeout_ms        = get_int_param("timeout_ms");
+
+    cfg_.front_left_can_id  = get_int_param("front_left_can_id");
+    cfg_.front_right_can_id = get_int_param("front_right_can_id");
+    cfg_.rear_left_can_id   = get_int_param("rear_left_can_id");
+    cfg_.rear_right_can_id  = get_int_param("rear_right_can_id");
+
+    cfg_.enc_counts_per_rev = get_int_param("enc_counts_per_rev");
   }
-  
+  catch (const std::exception & e)
+  {
+    RCLCPP_FATAL(logger, "%s", e.what());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
 
-  wheel_l_.setup(cfg_.left_wheel_name, cfg_.enc_counts_per_rev);
-  wheel_r_.setup(cfg_.right_wheel_name, cfg_.enc_counts_per_rev);
+  if (cfg_.enc_counts_per_rev <= 0)
+  {
+    RCLCPP_FATAL(logger, "enc_counts_per_rev must be > 0, got %d", cfg_.enc_counts_per_rev);
+    return hardware_interface::CallbackReturn::ERROR;
+  }
 
+  wheel_fl_.setup(cfg_.front_left_wheel_name, cfg_.enc_counts_per_rev);
+  wheel_fr_.setup(cfg_.front_right_wheel_name, cfg_.enc_counts_per_rev);
+  wheel_rl_.setup(cfg_.rear_left_wheel_name, cfg_.enc_counts_per_rev);
+  wheel_rr_.setup(cfg_.rear_right_wheel_name, cfg_.enc_counts_per_rev);
 
   for (const hardware_interface::ComponentInfo & joint : info_.joints)
   {
-    // DiffBotSystem has exactly two states and one command interface on each joint
     if (joint.command_interfaces.size() != 1)
     {
       RCLCPP_FATAL(
-        rclcpp::get_logger("DiffDriveCANBusHardware"),
-        "Joint '%s' has %zu command interfaces found. 1 expected.", joint.name.c_str(),
+        logger,
+        "Joint '%s' has %zu command interfaces found. 1 expected.",
+        joint.name.c_str(),
         joint.command_interfaces.size());
       return hardware_interface::CallbackReturn::ERROR;
     }
@@ -75,17 +99,20 @@ hardware_interface::CallbackReturn DiffDriveCANBusHardware::on_init(
     if (joint.command_interfaces[0].name != hardware_interface::HW_IF_VELOCITY)
     {
       RCLCPP_FATAL(
-        rclcpp::get_logger("DiffDriveCANBusHardware"),
-        "Joint '%s' have %s command interfaces found. '%s' expected.", joint.name.c_str(),
-        joint.command_interfaces[0].name.c_str(), hardware_interface::HW_IF_VELOCITY);
+        logger,
+        "Joint '%s' has command interface '%s'. Expected '%s'.",
+        joint.name.c_str(),
+        joint.command_interfaces[0].name.c_str(),
+        hardware_interface::HW_IF_VELOCITY);
       return hardware_interface::CallbackReturn::ERROR;
     }
 
     if (joint.state_interfaces.size() != 2)
     {
       RCLCPP_FATAL(
-        rclcpp::get_logger("DiffDriveCANBusHardware"),
-        "Joint '%s' has %zu state interface. 2 expected.", joint.name.c_str(),
+        logger,
+        "Joint '%s' has %zu state interfaces found. 2 expected.",
+        joint.name.c_str(),
         joint.state_interfaces.size());
       return hardware_interface::CallbackReturn::ERROR;
     }
@@ -93,51 +120,71 @@ hardware_interface::CallbackReturn DiffDriveCANBusHardware::on_init(
     if (joint.state_interfaces[0].name != hardware_interface::HW_IF_POSITION)
     {
       RCLCPP_FATAL(
-        rclcpp::get_logger("DiffDriveCANBusHardware"),
-        "Joint '%s' have '%s' as first state interface. '%s' expected.", joint.name.c_str(),
-        joint.state_interfaces[0].name.c_str(), hardware_interface::HW_IF_POSITION);
+        logger,
+        "Joint '%s' has first state interface '%s'. Expected '%s'.",
+        joint.name.c_str(),
+        joint.state_interfaces[0].name.c_str(),
+        hardware_interface::HW_IF_POSITION);
       return hardware_interface::CallbackReturn::ERROR;
     }
 
     if (joint.state_interfaces[1].name != hardware_interface::HW_IF_VELOCITY)
     {
       RCLCPP_FATAL(
-        rclcpp::get_logger("DiffDriveCANBusHardware"),
-        "Joint '%s' have '%s' as second state interface. '%s' expected.", joint.name.c_str(),
-        joint.state_interfaces[1].name.c_str(), hardware_interface::HW_IF_VELOCITY);
+        logger,
+        "Joint '%s' has second state interface '%s'. Expected '%s'.",
+        joint.name.c_str(),
+        joint.state_interfaces[1].name.c_str(),
+        hardware_interface::HW_IF_VELOCITY);
       return hardware_interface::CallbackReturn::ERROR;
     }
   }
 
+  RCLCPP_INFO(logger, "DiffDriveCANBusHardware successfully initialised.");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-std::vector<hardware_interface::StateInterface> DiffDriveCANBusHardware::export_state_interfaces()
+std::vector<hardware_interface::StateInterface>
+DiffDriveCANBusHardware::export_state_interfaces()
 {
   std::vector<hardware_interface::StateInterface> state_interfaces;
 
-  state_interfaces.emplace_back(hardware_interface::StateInterface(
-    wheel_l_.name, hardware_interface::HW_IF_POSITION, &wheel_l_.pos));
-  state_interfaces.emplace_back(hardware_interface::StateInterface(
-    wheel_l_.name, hardware_interface::HW_IF_VELOCITY, &wheel_l_.vel));
+  state_interfaces.emplace_back(
+    wheel_fl_.name, hardware_interface::HW_IF_POSITION, &wheel_fl_.pos);
+  state_interfaces.emplace_back(
+    wheel_fl_.name, hardware_interface::HW_IF_VELOCITY, &wheel_fl_.vel);
 
-  state_interfaces.emplace_back(hardware_interface::StateInterface(
-    wheel_r_.name, hardware_interface::HW_IF_POSITION, &wheel_r_.pos));
-  state_interfaces.emplace_back(hardware_interface::StateInterface(
-    wheel_r_.name, hardware_interface::HW_IF_VELOCITY, &wheel_r_.vel));
+  state_interfaces.emplace_back(
+    wheel_fr_.name, hardware_interface::HW_IF_POSITION, &wheel_fr_.pos);
+  state_interfaces.emplace_back(
+    wheel_fr_.name, hardware_interface::HW_IF_VELOCITY, &wheel_fr_.vel);
+
+  state_interfaces.emplace_back(
+    wheel_rl_.name, hardware_interface::HW_IF_POSITION, &wheel_rl_.pos);
+  state_interfaces.emplace_back(
+    wheel_rl_.name, hardware_interface::HW_IF_VELOCITY, &wheel_rl_.vel);
+
+  state_interfaces.emplace_back(
+    wheel_rr_.name, hardware_interface::HW_IF_POSITION, &wheel_rr_.pos);
+  state_interfaces.emplace_back(
+    wheel_rr_.name, hardware_interface::HW_IF_VELOCITY, &wheel_rr_.vel);
 
   return state_interfaces;
 }
 
-std::vector<hardware_interface::CommandInterface> DiffDriveCANBusHardware::export_command_interfaces()
+std::vector<hardware_interface::CommandInterface>
+DiffDriveCANBusHardware::export_command_interfaces()
 {
   std::vector<hardware_interface::CommandInterface> command_interfaces;
 
-  command_interfaces.emplace_back(hardware_interface::CommandInterface(
-    wheel_l_.name, hardware_interface::HW_IF_VELOCITY, &wheel_l_.cmd));
-
-  command_interfaces.emplace_back(hardware_interface::CommandInterface(
-    wheel_r_.name, hardware_interface::HW_IF_VELOCITY, &wheel_r_.cmd));
+  command_interfaces.emplace_back(
+    wheel_fl_.name, hardware_interface::HW_IF_VELOCITY, &wheel_fl_.cmd);
+  command_interfaces.emplace_back(
+    wheel_fr_.name, hardware_interface::HW_IF_VELOCITY, &wheel_fr_.cmd);
+  command_interfaces.emplace_back(
+    wheel_rl_.name, hardware_interface::HW_IF_VELOCITY, &wheel_rl_.cmd);
+  command_interfaces.emplace_back(
+    wheel_rr_.name, hardware_interface::HW_IF_VELOCITY, &wheel_rr_.cmd);
 
   return command_interfaces;
 }
@@ -145,54 +192,91 @@ std::vector<hardware_interface::CommandInterface> DiffDriveCANBusHardware::expor
 hardware_interface::CallbackReturn DiffDriveCANBusHardware::on_configure(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
-  RCLCPP_INFO(rclcpp::get_logger("DiffDriveCANBusHardware"), "Configuring ...please wait...");
-  if (comms_.connected())
-  {
-    comms_.disconnect();
-  }
-  comms_.connect(cfg_.device, cfg_.baud_rate, cfg_.timeout_ms);
-  RCLCPP_INFO(rclcpp::get_logger("DiffDriveCANBusHardware"), "Successfully configured!");
+  auto logger = rclcpp::get_logger("DiffDriveCANBusHardware");
+  RCLCPP_INFO(logger, "Configuring hardware interface...");
 
+  try
+  {
+    if (comms_.connected())
+    {
+      comms_.disconnect();
+    }
+
+    comms_.connect(cfg_.serial_device, cfg_.serial_baud_rate, cfg_.timeout_ms);
+
+    if (!comms_.configure_adapter(cfg_.can_baud_rate))
+    {
+      RCLCPP_ERROR(logger, "Failed to configure CAN adapter.");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+  }
+  catch (const std::exception & e)
+  {
+    RCLCPP_ERROR(logger, "Exception during configure: %s", e.what());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  RCLCPP_INFO(logger, "Hardware interface configured successfully.");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn DiffDriveCANBusHardware::on_cleanup(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
-  RCLCPP_INFO(rclcpp::get_logger("DiffDriveCANBusHardware"), "Cleaning up ...please wait...");
+  auto logger = rclcpp::get_logger("DiffDriveCANBusHardware");
+  RCLCPP_INFO(logger, "Cleaning up hardware interface...");
+
   if (comms_.connected())
   {
     comms_.disconnect();
   }
-  RCLCPP_INFO(rclcpp::get_logger("DiffDriveCANBusHardware"), "Successfully cleaned up!");
 
+  RCLCPP_INFO(logger, "Cleanup complete.");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
-
 
 hardware_interface::CallbackReturn DiffDriveCANBusHardware::on_activate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
-  RCLCPP_INFO(rclcpp::get_logger("DiffDriveCANBusHardware"), "Activating ...please wait...");
+  auto logger = rclcpp::get_logger("DiffDriveCANBusHardware");
+  RCLCPP_INFO(logger, "Activating hardware interface...");
+
   if (!comms_.connected())
   {
+    RCLCPP_ERROR(logger, "Cannot activate: CAN adapter is not connected.");
     return hardware_interface::CallbackReturn::ERROR;
   }
-  if (cfg_.pid_p > 0)
-  {
-    comms_.set_pid_values(cfg_.pid_p,cfg_.pid_d,cfg_.pid_i,cfg_.pid_o);
-  }
-  RCLCPP_INFO(rclcpp::get_logger("DiffDriveCANBusHardware"), "Successfully activated!");
 
+  wheel_fl_.cmd = 0.0;
+  wheel_fr_.cmd = 0.0;
+  wheel_rl_.cmd = 0.0;
+  wheel_rr_.cmd = 0.0;
+
+  wheel_fl_.vel = 0.0;
+  wheel_fr_.vel = 0.0;
+  wheel_rl_.vel = 0.0;
+  wheel_rr_.vel = 0.0;
+
+  RCLCPP_INFO(logger, "Hardware interface activated.");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn DiffDriveCANBusHardware::on_deactivate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
-  RCLCPP_INFO(rclcpp::get_logger("DiffDriveCANBusHardware"), "Deactivating ...please wait...");
-  RCLCPP_INFO(rclcpp::get_logger("DiffDriveCANBusHardware"), "Successfully deactivated!");
+  auto logger = rclcpp::get_logger("DiffDriveCANBusHardware");
+  RCLCPP_INFO(logger, "Deactivating hardware interface...");
 
+  if (comms_.connected())
+  {
+    // Send zero commands on deactivate for safety
+    (void)comms_.write_motor_command(cfg_.front_left_can_id, 0);
+    (void)comms_.write_motor_command(cfg_.front_right_can_id, 0);
+    (void)comms_.write_motor_command(cfg_.rear_left_can_id, 0);
+    (void)comms_.write_motor_command(cfg_.rear_right_can_id, 0);
+  }
+
+  RCLCPP_INFO(logger, "Hardware interface deactivated.");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -204,22 +288,48 @@ hardware_interface::return_type DiffDriveCANBusHardware::read(
     return hardware_interface::return_type::ERROR;
   }
 
-  comms_.read_encoder_values(wheel_l_.enc, wheel_r_.enc);
+  auto update_wheel_from_encoder = [&](Wheel & wheel, int can_id) -> bool
+  {
+    int enc = 0;
+    if (!comms_.read_motor_encoder(can_id, enc))
+    {
+      return false;
+    }
 
-  double delta_seconds = period.seconds();
+    const double previous_pos = wheel.pos;
+    wheel.enc = enc;
+    wheel.pos = wheel.calc_enc_angle();
 
-  double pos_prev = wheel_l_.pos;
-  wheel_l_.pos = wheel_l_.calc_enc_angle();
-  wheel_l_.vel = (wheel_l_.pos - pos_prev) / delta_seconds;
+    const double dt = period.seconds();
+    if (dt > 0.0)
+    {
+      wheel.vel = (wheel.pos - previous_pos) / dt;
+    }
+    else
+    {
+      wheel.vel = 0.0;
+    }
 
-  pos_prev = wheel_r_.pos;
-  wheel_r_.pos = wheel_r_.calc_enc_angle();
-  wheel_r_.vel = (wheel_r_.pos - pos_prev) / delta_seconds;
+    return true;
+  };
+
+  if (!update_wheel_from_encoder(wheel_fl_, cfg_.front_left_can_id)) {
+    return hardware_interface::return_type::ERROR;
+  }
+  if (!update_wheel_from_encoder(wheel_fr_, cfg_.front_right_can_id)) {
+    return hardware_interface::return_type::ERROR;
+  }
+  if (!update_wheel_from_encoder(wheel_rl_, cfg_.rear_left_can_id)) {
+    return hardware_interface::return_type::ERROR;
+  }
+  if (!update_wheel_from_encoder(wheel_rr_, cfg_.rear_right_can_id)) {
+    return hardware_interface::return_type::ERROR;
+  }
 
   return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type diffdrive_canbus ::DiffDriveCANBusHardware::write(
+hardware_interface::return_type DiffDriveCANBusHardware::write(
   const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
 {
   if (!comms_.connected())
@@ -227,14 +337,43 @@ hardware_interface::return_type diffdrive_canbus ::DiffDriveCANBusHardware::writ
     return hardware_interface::return_type::ERROR;
   }
 
-  int motor_l_counts_per_loop = wheel_l_.cmd / wheel_l_.rads_per_count / cfg_.loop_rate;
-  int motor_r_counts_per_loop = wheel_r_.cmd / wheel_r_.rads_per_count / cfg_.loop_rate;
-  comms_.set_motor_values(motor_l_counts_per_loop, motor_r_counts_per_loop);
+  auto rad_s_to_counts_per_cycle = [](const Wheel & wheel, double cmd_rad_s) -> int
+  {
+    if (wheel.rads_per_count <= 0.0)
+    {
+      return 0;
+    }
+
+    // This is a placeholder scaling.
+    // Replace with your actual motor-controller command units if needed.
+    return static_cast<int>(std::round(cmd_rad_s / wheel.rads_per_count));
+  };
+
+  const int fl_cmd = rad_s_to_counts_per_cycle(wheel_fl_, wheel_fl_.cmd);
+  const int fr_cmd = rad_s_to_counts_per_cycle(wheel_fr_, wheel_fr_.cmd);
+  const int rl_cmd = rad_s_to_counts_per_cycle(wheel_rl_, wheel_rl_.cmd);
+  const int rr_cmd = rad_s_to_counts_per_cycle(wheel_rr_, wheel_rr_.cmd);
+
+  if (!comms_.write_motor_command(cfg_.front_left_can_id, fl_cmd)) {
+    return hardware_interface::return_type::ERROR;
+  }
+  if (!comms_.write_motor_command(cfg_.front_right_can_id, fr_cmd)) {
+    return hardware_interface::return_type::ERROR;
+  }
+  if (!comms_.write_motor_command(cfg_.rear_left_can_id, rl_cmd)) {
+    return hardware_interface::return_type::ERROR;
+  }
+  if (!comms_.write_motor_command(cfg_.rear_right_can_id, rr_cmd)) {
+    return hardware_interface::return_type::ERROR;
+  }
+
   return hardware_interface::return_type::OK;
 }
 
 }  // namespace diffdrive_canbus
 
 #include "pluginlib/class_list_macros.hpp"
+
 PLUGINLIB_EXPORT_CLASS(
-  diffdrive_canbus::DiffDriveCANBusHardware, hardware_interface::SystemInterface)
+  diffdrive_canbus::DiffDriveCANBusHardware,
+  hardware_interface::SystemInterface)

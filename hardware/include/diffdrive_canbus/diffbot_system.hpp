@@ -31,7 +31,7 @@
 #include "rclcpp_lifecycle/state.hpp"
 #include "diffdrive_canbus/visibility_control.h"
 
-#include "diffdrive_canbus/arduino_comms.hpp"
+#include "diffdrive_canbus/CAN_comms.hpp"
 #include "diffdrive_canbus/wheel.hpp"
 
 namespace diffdrive_canbus
@@ -41,19 +41,23 @@ class DiffDriveCANBusHardware : public hardware_interface::SystemInterface
 
 struct Config
 {
-  std::string left_wheel_name = "";
-  std::string right_wheel_name = "";
-  float loop_rate = 0.0;
-  std::string device = "";
-  int baud_rate = 0;
-  int timeout_ms = 0;
-  int enc_counts_per_rev = 0;
-  int pid_p = 0;
-  int pid_d = 0;
-  int pid_i = 0;
-  int pid_o = 0;
-};
+  std::string front_left_wheel_name;
+  std::string front_right_wheel_name;
+  std::string rear_left_wheel_name;
+  std::string rear_right_wheel_name;
 
+  std::string serial_device;
+  int serial_baud_rate;
+  int can_baud_rate;
+  int timeout_ms;
+
+  int front_left_can_id;
+  int front_right_can_id;
+  int rear_left_can_id;
+  int rear_right_can_id;
+
+  int enc_counts_per_rev = 0;
+};
 
 public:
   RCLCPP_SHARED_PTR_DEFINITIONS(DiffDriveCANBusHardware);
@@ -95,10 +99,12 @@ public:
 
 private:
 
-  ArduinoComms comms_;
+  CANComms comms_;
   Config cfg_;
-  Wheel wheel_l_;
-  Wheel wheel_r_;
+  Wheel wheel_fl_;
+  Wheel wheel_fr_;
+  Wheel wheel_rl_;
+  Wheel wheel_rr_;
 };
 
 }  // namespace diffdrive_canbus
