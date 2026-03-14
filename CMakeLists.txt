@@ -51,7 +51,7 @@ install(
   DESTINATION include/diffdrive_canbus
 )
 install(
-  DIRECTORY description/launch description/ros2_control description/urdf description/rviz
+  DIRECTORY description/ros2_control description/urdf
   DESTINATION share/diffdrive_canbus
 )
 install(
